@@ -1,0 +1,10 @@
+
+drop table if exists mess.overview_2_3;
+create table mess.overview_2_3 as
+  select a.gid as gid,(a.value)/1 as value from
+    mess.view_2_3_1 a ;
+
+
+
+
+

@@ -1,0 +1,11 @@
+mess.sql
+err.out
+std.out
+errors
+errors.log
+*.out
+**/*.out
+**/**/*.out
+datasets
+
+# ignores current, lower and lower folders for .out

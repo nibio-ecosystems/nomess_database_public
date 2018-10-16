@@ -1,0 +1,185 @@
+-- NOTE: This needs to be reviewed. 
+-- 1-3 Internal institute map issues/queries..
+-- 4. GBB has changed tiltaktypeid to tiltaksklasseid
+
+-- Non-tillage area fra AR5 + erosjonsrisiko
+-- Valid area  "Cut out of AR5 all areas with an erosion risk = svært høy + høy + middels – that’s the only relevant area"
+-- permanently vegetated land would be beite + overflatedyrka mark in AR5: that’s considered the best remedy
+-- Varig vegetasjonsdekke (alt unntatt fulldyrka mark) 	: 100
+
+-- IF the area gets RMP money for hindering erosion (but not kept as permanent vegetation)
+-- Areal får RMP for erosjonsreduserende tiltak 	: 0	
+-- IF the area is kept as fully cultivated land and does not apply for RMP to hinder erosion
+-- Fulldyrka mark i erosjonsrisikoklasse 		: -100 
+
+-- A short comment from Graeme
+-- If there is erosion data and it's good (low risk), we mark the value as good (100).
+-- If there is erosion data and it's bad (high risk), we mark it as bad (-100).
+-- If there is erosion data and it's bad (high risk), but there is an RMP subsidy to fix it, we mark it as average (0).
+-- If there is no erosion data, we must assume the average/nodata value (0).
+
+-- removed: information on map classifications
+
+DROP TYPE if exists mess.function_2_3_1_type CASCADE;
+
+CREATE TYPE mess.function_2_3_1_type AS 
+(		  	
+	gid bigint,
+	value integer
+);
+
+
+DROP FUNCTION if exists mess.function_2_3_1(p_in geometry) cascade ;
+
+
+CREATE OR REPLACE FUNCTION mess.function_2_3_1(p_in geometry) 
+returns setof mess.function_2_3_1_type AS $BODY$
+DECLARE
+	returnrec mess.function_2_3_1_type;
+	boundary geometry;
+
+BEGIN
+	
+	CREATE TEMP TABLE  geo_omr(
+		gid bigint,
+		value integer,
+		valid_area_point boolean ,
+		geo geometry(geometry,4258)
+	);
+		
+	-- default value is 0
+	IF ST_IsEmpty(p_in) THEN
+		INSERT INTO geo_omr(gid,value,geo)   		
+		SELECT pt1.gid, 0 AS value, pt1.geom4258 as geo
+		FROM mess.nor_pts AS pt1;
+
+		SELECT ST_Envelope(ST_Extent(geom4258)) INTO boundary FROM mess.nor_pts;
+		--ST_SetSRID(boundary,4258);
+	ELSE 
+		
+		INSERT INTO geo_omr(gid,value,geo)   		
+		SELECT pt1.gid, 0 AS value, pt1.geom4258 as geo
+		FROM mess.nor_pts AS pt1
+		WHERE ST_Intersects(pt1.geom4258,p_in);
+
+		SELECT p_in into boundary;
+	END IF;
+
+		 	
+	CREATE INDEX geoidx_geo_omr
+	ON geo_omr
+	USING gist(geo);
+
+	-- Cut out of AR5 all areas with an erosion risk = svært høy + høy + middels – that’s the only relevant area
+	-- valid area points for this set
+	UPDATE geo_omr  pt
+	SET valid_area_point=true
+	FROM (	SELECT
+		pt1.gid AS gid
+		FROM 
+		geo_omr AS pt1,
+		REMOVED_JM_GPI_FLATE AS data1,
+		REMOVED_AR5_GPI_KLASSE_FLATE AS data2
+		WHERE 
+		data1.geo && boundary AND
+		data2.geo && boundary AND
+		ST_Contains(data1.geo,pt1.geo) AND
+		ST_Contains(data2.geo,pt1.geo) AND
+		data1.erosjonsrisiko in (2,3,4)
+	) AS r1
+	WHERE pt.gid = r1.gid ;
+
+	-- set 100
+	-- permanently vegetated land would be beite + overflatedyrka mark in AR5: that’s considered the best remedy
+	-- Varig vegetasjonsdekke (alt unntatt fulldyrka mark) 	: 100
+
+	UPDATE geo_omr  pt
+	SET value=100
+	FROM (	SELECT
+		pt1.gid AS gid
+		FROM 
+		geo_omr AS pt1,
+		REMOVED_AR5_KLASSE_FLATE AS data2
+		WHERE 
+		data2.geo && boundary AND
+		pt1.valid_area_point = '1' AND -- only use points in the valid intersection
+		ST_Contains(data2.geo,pt1.geo) AND
+		data2.artype in (21,22)
+	) AS r1
+	WHERE pt.gid = r1.gid ;
+
+	
+	-- if have applied for RMP but not for erosjon use -100 or you hav not appliead at all use -100
+	UPDATE geo_omr pt
+	SET value=-100
+	FROM (	SELECT
+		pt1.gid AS gid
+		FROM 
+		geo_omr AS pt1,
+		REMOVED_APPLICATION_MAP AS data3,
+		REMOVED_TILTAK_MAP AS data4
+		WHERE 
+		data3.geo && boundary AND
+		pt1.valid_area_point = '1' AND -- only use points in the valid intersection
+		pt1.value =  0 AND -- only consider points not set
+		ST_Contains(data3.geo,pt1.geo) AND
+		data3.fk_tiltak_klasse_id = data4.id AND
+		NOT data4.aktivitetsomraade_id in (11,12)
+		
+	) AS r1
+	WHERE pt.gid = r1.gid ;
+
+
+	-- if have not applied for RMP att all use value  -100
+	UPDATE geo_omr pt
+	SET value=-100
+	FROM (	SELECT
+		pt1.gid AS gid
+		FROM 
+		geo_omr AS pt1,
+		REMOVED_APPLICATION_MAP AS data3
+		WHERE 
+		data3.geo && boundary AND
+		pt1.valid_area_point = '1' AND -- only use points in the valid intersection
+		pt1.value =  0 AND -- only consider points not set
+		NOT ST_Contains(data3.geo,pt1.geo) 
+		
+	) AS r1
+	WHERE pt.gid = r1.gid ;
+
+
+	-- compute value -100
+	-- if have not applied for RMP use -100 wjich is 
+
+
+
+	FOR returnrec IN SELECT gid,value FROM geo_omr LOOP
+        RETURN NEXT returnrec;
+    	END LOOP;
+
+    
+	DROP TABLE geo_omr;
+
+
+
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
+drop table if exists mess.view_2_3_1;
+CREATE table mess.view_2_3_1 AS
+  	SELECT (r1).function_2_3_1.gid::bigint, (r1).function_2_3_1.value::integer
+	FROM (
+		select mess.function_2_3_1(ST_GeomFromText('POLYGON EMPTY'))
+	) as r1;
+
+
+-- DROP VIEW mess.view_2_3_1_quick;
+
+CREATE OR REPLACE VIEW mess.view_2_3_1_quick AS
+  	SELECT (r1).function_2_3_1.gid::bigint, (r1).function_2_3_1.value::integer
+	FROM (
+		select mess.function_2_3_1(ST_GeomFromText('SRID=4258;POLYGON((10.6558688136438 59.3402438918609,10.6466824831826 			59.4118779477458,10.8399481744994 59.4181898901846,10.8487296062088 59.3465379468792,10.6558688136438 59.3402438918609))'))
+	) as r1;
+
+
